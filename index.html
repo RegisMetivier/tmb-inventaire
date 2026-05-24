@@ -158,11 +158,23 @@ footer button { flex: 1; }
   </div>
 </div>
 
+<div class="modal" id="modal-pin" style="display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,0.95)">
+  <div class="modal-content">
+    <h2>🔒 Accès Inventaire TMB</h2>
+    <p style="margin-bottom:12px; opacity:0.8; font-size:14px">Entre le code d'accès.</p>
+    <input type="password" id="pin-input" class="name-input" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="••••" autocomplete="off" style="font-size:24px; text-align:center; letter-spacing:8px;">
+    <div id="pin-error" style="color:#e74c3c; margin-top:8px; font-size:14px; display:none"></div>
+    <div class="modal-actions">
+      <button class="success full-btn" id="pin-submit">Valider</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="modal-user">
   <div class="modal-content">
     <h2>👤 Qui scanne ?</h2>
     <p style="margin-bottom:12px; opacity:0.8; font-size:14px">Ton nom sera inclus dans l'export CSV pour traçabilité. Tu peux le changer plus tard.</p>
-    <input type="text" id="user-name-input" class="name-input" placeholder="Prénom (ex: Regis, Maxime)" autocomplete="off" maxlength="40">
+    <input type="text" id="user-name-input" class="name-input" placeholder="Prénom" autocomplete="off" maxlength="40">
     <div class="modal-actions">
       <button class="success full-btn" id="user-save">Valider</button>
     </div>
@@ -181,7 +193,7 @@ footer button { flex: 1; }
   </div>
 </div>
 
-<script src="https://unpkg.com/html5-qrcode@2.3.10/html5-qrcode.min.js"></script>
+<script src="html5-qrcode.min.js"></script>
 <script>
 (() => {
 'use strict';
@@ -189,6 +201,10 @@ footer button { flex: 1; }
 const STORAGE_KEY = 'tmb_inventory_v1';
 const USER_KEY = 'tmb_user_v1';
 const DEVICE_KEY = 'tmb_device_id_v1';
+const AUTH_KEY = 'tmb_auth_v1';
+// Hash SHA-256 du PIN d'acces. Le PIN en clair n'est jamais dans le code.
+const PIN_HASH = 'f8638b979b2f4f793ddb6dbd197e0ee25a7a6ea32b0ae22f5e3c5d119d839e75';
+let failedPinAttempts = 0;
 let inventory = loadInventory();
 let userInfo = loadUserInfo();
 
@@ -605,16 +621,64 @@ el('user-save').addEventListener('click', () => {
 el('user-name-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('user-save').click(); });
 el('change-user').addEventListener('click', (e) => { e.preventDefault(); promptUserName(); });
 
-// INIT
-dbg('App initialisee, user=' + (userInfo.name || 'aucun') + ', device=' + userInfo.device_id.substring(0,8));
-dbg('navigator.mediaDevices = ' + (navigator.mediaDevices ? 'OK' : 'MANQUANT'));
-dbg('Html5Qrcode = ' + (typeof Html5Qrcode !== 'undefined' ? 'OK' : 'PAS CHARGEE'));
-updateUserUI();
-if (!userInfo.name) {
-  // Premiere visite : on demande le nom
-  promptUserName();
+// ---- PIN authentication ----
+async function sha256(text) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
 }
-refreshUI();
+
+function isAuthenticated() {
+  return localStorage.getItem(AUTH_KEY) === '1';
+}
+
+async function submitPin() {
+  const pin = el('pin-input').value.trim();
+  if (!pin) return;
+  const errEl = el('pin-error');
+  if (failedPinAttempts >= 5) {
+    errEl.textContent = 'Trop d\'essais. Patiente 30s.';
+    errEl.style.display = 'block';
+    return;
+  }
+  const h = await sha256(pin);
+  if (h === PIN_HASH) {
+    localStorage.setItem(AUTH_KEY, '1');
+    el('modal-pin').style.display = 'none';
+    dbg('Authentification PIN OK');
+    initApp();
+  } else {
+    failedPinAttempts++;
+    errEl.textContent = `Code incorrect (essai ${failedPinAttempts}/5)`;
+    errEl.style.display = 'block';
+    el('pin-input').value = '';
+    if (failedPinAttempts >= 5) {
+      setTimeout(() => { failedPinAttempts = 0; errEl.style.display = 'none'; }, 30000);
+    }
+  }
+}
+
+el('pin-submit').addEventListener('click', submitPin);
+el('pin-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') submitPin(); });
+
+function initApp() {
+  dbg('App initialisee, user=' + (userInfo.name || 'aucun') + ', device=' + userInfo.device_id.substring(0,8));
+  dbg('navigator.mediaDevices = ' + (navigator.mediaDevices ? 'OK' : 'MANQUANT'));
+  dbg('Html5Qrcode = ' + (typeof Html5Qrcode !== 'undefined' ? 'OK' : 'PAS CHARGEE'));
+  updateUserUI();
+  if (!userInfo.name) {
+    promptUserName();
+  }
+  refreshUI();
+}
+
+// INIT
+if (isAuthenticated()) {
+  el('modal-pin').style.display = 'none';
+  initApp();
+} else {
+  // Modal PIN s'affiche par defaut, on cache le reste
+  setTimeout(() => el('pin-input').focus(), 200);
+}
 })();
 </script>
 </body>
