@@ -76,8 +76,14 @@ footer button { flex: 1; }
 
 <header>
   <h1>📦 Inventaire TMB</h1>
-  <div class="counters">
-    <span id="counter-refs">0</span> réf · <span id="counter-qty">0</span> qté
+  <div style="text-align:right">
+    <div class="counters">
+      <span id="counter-refs">0</span> réf · <span id="counter-qty">0</span> qté
+    </div>
+    <div style="font-size:11px; opacity:0.7; margin-top:2px">
+      <span id="user-label">—</span> · <span id="device-label" style="font-family:monospace">—</span>
+      <a href="#" id="change-user" style="color:#3498db; margin-left:4px;">[change]</a>
+    </div>
   </div>
 </header>
 
@@ -144,6 +150,18 @@ footer button { flex: 1; }
   </div>
 </div>
 
+<div class="modal" id="modal-user">
+  <div class="modal-content">
+    <h2>👤 Qui scanne ?</h2>
+    <p style="margin-bottom:12px; opacity:0.8; font-size:14px">Ton nom sera inclus dans l'export CSV pour traçabilité. Tu peux le changer plus tard.</p>
+    <input type="text" id="user-name-input" class="name-input" placeholder="Prénom (ex: Regis, Maxime)" autocomplete="off" maxlength="40">
+    <div class="modal-actions">
+      <button class="success full-btn" id="user-save">Valider</button>
+    </div>
+    <p style="margin-top:14px; font-size:11px; opacity:0.6">Device ID : <span id="user-device-preview" style="font-family:monospace"></span></p>
+  </div>
+</div>
+
 <div class="modal" id="modal-search">
   <div class="modal-content">
     <h2>Rechercher dans la liste</h2>
@@ -161,7 +179,44 @@ footer button { flex: 1; }
 'use strict';
 
 const STORAGE_KEY = 'tmb_inventory_v1';
+const USER_KEY = 'tmb_user_v1';
+const DEVICE_KEY = 'tmb_device_id_v1';
 let inventory = loadInventory();
+let userInfo = loadUserInfo();
+
+function uuid4() {
+  if (crypto && crypto.randomUUID) return crypto.randomUUID();
+  // Fallback
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+function loadUserInfo() {
+  let device_id = localStorage.getItem(DEVICE_KEY);
+  if (!device_id) {
+    device_id = uuid4();
+    localStorage.setItem(DEVICE_KEY, device_id);
+  }
+  const name = localStorage.getItem(USER_KEY) || '';
+  return { device_id, name };
+}
+function saveUserName(name) {
+  userInfo.name = name;
+  localStorage.setItem(USER_KEY, name);
+}
+
+function updateUserUI() {
+  el('user-label').textContent = userInfo.name || 'anonyme';
+  el('device-label').textContent = userInfo.device_id.slice(0, 8);
+}
+function promptUserName() {
+  el('user-name-input').value = userInfo.name || '';
+  el('user-device-preview').textContent = userInfo.device_id;
+  el('modal-user').classList.add('active');
+  setTimeout(() => el('user-name-input').focus(), 200);
+}
 let scanner = null;
 let scanning = false;
 let lastScanned = { ean: null, ts: 0 };
@@ -463,29 +518,61 @@ el('btn-export').addEventListener('click', () => {
     showNotice('Liste vide, rien à exporter', 'error');
     return;
   }
-  const rows = [['ean', 'qty', 'name', 'first_scan_iso', 'last_scan_iso']];
+  // Header metadata (commentaires) puis lignes de donnees
+  const metaLines = [
+    `# Inventaire TMB - export`,
+    `# device_id: ${userInfo.device_id}`,
+    `# scanned_by: ${userInfo.name || 'anonyme'}`,
+    `# generated_at: ${new Date().toISOString()}`,
+    `# nb_refs: ${Object.keys(inventory).length}`,
+    `# app_version: 1.0`,
+  ];
+  const rows = [['ean', 'qty', 'name', 'scanned_by', 'device_id', 'first_scan_iso', 'last_scan_iso']];
   for (const [ean, it] of Object.entries(inventory)) {
     rows.push([
       ean,
       it.qty,
       (it.name || '').replace(/"/g, '""'),
+      userInfo.name || 'anonyme',
+      userInfo.device_id,
       new Date(it.first_scan).toISOString(),
       new Date(it.last_scan).toISOString(),
     ]);
   }
-  const csv = '﻿' + rows.map(r => r.map(c => /[",\n;]/.test(c + '') ? `"${c}"` : c).join(';')).join('\n');
+  const csv = '﻿' + metaLines.join('\n') + '\n' + rows.map(r => r.map(c => /[",\n;]/.test(c + '') ? `"${c}"` : c).join(';')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
   const ts = new Date().toISOString().slice(0,16).replace(/[:T]/g, '-');
-  a.download = `inventaire_tmb_${ts}.csv`;
+  const safeName = (userInfo.name || 'anonyme').replace(/[^a-zA-Z0-9]/g, '');
+  a.download = `inventaire_tmb_${safeName}_${ts}.csv`;
   document.body.appendChild(a); a.click(); document.body.removeChild(a);
   URL.revokeObjectURL(url);
   showNotice(`Export OK : ${Object.keys(inventory).length} références`, 'success');
 });
 
+// USER PROMPT (premiere connexion ou changement)
+el('user-save').addEventListener('click', () => {
+  const name = el('user-name-input').value.trim();
+  if (!name) {
+    el('user-name-input').focus();
+    return;
+  }
+  saveUserName(name);
+  updateUserUI();
+  el('modal-user').classList.remove('active');
+  showNotice(`Connecté comme ${name}`, 'success');
+});
+el('user-name-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') el('user-save').click(); });
+el('change-user').addEventListener('click', (e) => { e.preventDefault(); promptUserName(); });
+
 // INIT
+updateUserUI();
+if (!userInfo.name) {
+  // Premiere visite : on demande le nom
+  promptUserName();
+}
 refreshUI();
 })();
 </script>
