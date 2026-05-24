@@ -70,6 +70,11 @@ footer button { flex: 1; }
 .notice { background: #f39c12; color: #1a1a1a; padding: 10px; border-radius: 8px; margin-bottom: 12px; font-size: 14px; text-align: center; font-weight: 600; }
 .notice.error { background: #e74c3c; color: white; }
 .notice.success { background: #27ae60; color: white; }
+
+#debug-panel { position: fixed; bottom: 70px; left: 0; right: 0; max-height: 40vh; overflow-y: auto; background: rgba(0,0,0,0.95); color: #0f0; font-family: monospace; font-size: 11px; padding: 8px; z-index: 50; display: none; border-top: 2px solid #0f0; }
+#debug-panel.show { display: block; }
+#debug-panel .line { padding: 2px 0; border-bottom: 1px solid #333; word-wrap: break-word; }
+#debug-toggle { position: fixed; top: 70px; right: 8px; z-index: 51; background: #0f0; color: #000; border: none; padding: 6px 10px; border-radius: 4px; font-size: 12px; font-weight: bold; }
 </style>
 </head>
 <body>
@@ -128,6 +133,9 @@ footer button { flex: 1; }
   <button id="btn-export" class="success">📥 Export CSV</button>
 </footer>
 
+<button id="debug-toggle" onclick="document.getElementById('debug-panel').classList.toggle('show')">DEBUG</button>
+<div id="debug-panel"></div>
+
 <div class="modal" id="modal-manual">
   <div class="modal-content">
     <h2>Saisie manuelle</h2>
@@ -183,6 +191,18 @@ const USER_KEY = 'tmb_user_v1';
 const DEVICE_KEY = 'tmb_device_id_v1';
 let inventory = loadInventory();
 let userInfo = loadUserInfo();
+
+function dbg(msg) {
+  const p = document.getElementById('debug-panel');
+  if (p) {
+    const line = document.createElement('div');
+    line.className = 'line';
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+    p.appendChild(line);
+    p.scrollTop = p.scrollHeight;
+  }
+  console.log('[DBG]', msg);
+}
 
 function uuid4() {
   if (crypto && crypto.randomUUID) return crypto.randomUUID();
@@ -337,59 +357,77 @@ function hideCurrentProduct() {
 }
 
 async function startScanner() {
+  dbg('startScanner() appele, scanning=' + scanning);
   if (scanning) return;
-  // Verifier que la lib est chargee
   if (typeof Html5Qrcode === 'undefined') {
-    showNotice('Lib scan non chargée. Vérifie ta connexion internet et recharge la page.', 'error');
+    dbg('ERREUR: Html5Qrcode = undefined, lib pas chargee');
+    showNotice('Lib scan non chargée. Vérifie ta connexion et recharge.', 'error');
     return;
   }
+  dbg('Html5Qrcode OK, version=' + (Html5Qrcode.VERSION || '?'));
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    dbg('ERREUR: pas de navigator.mediaDevices.getUserMedia');
+    showNotice('Caméra non supportée par ce navigateur.', 'error');
+    return;
+  }
+  dbg('navigator.mediaDevices.getUserMedia OK');
+
+  // Tentative directe sans test prealable (pour eviter de doubler la demande)
   if (!scanner) {
     try {
       scanner = new Html5Qrcode('reader');
+      dbg('new Html5Qrcode("reader") OK');
     } catch (e) {
+      dbg('ERREUR new Html5Qrcode: ' + (e.message || e));
       showNotice('Init scanner KO : ' + (e.message || e), 'error');
       return;
     }
   }
+
+  // Lister les cameras d'abord (plus fiable que facingMode)
+  let cameras = [];
+  try {
+    cameras = await Html5Qrcode.getCameras();
+    dbg('Cameras detectees: ' + cameras.length);
+    cameras.forEach((c, i) => dbg(`  cam ${i}: id=${c.id.substring(0,20)}... label=${c.label}`));
+  } catch (e) {
+    dbg('ERREUR getCameras: ' + (e.message || e));
+    showNotice('Liste cameras KO : ' + (e.message || e), 'error');
+    return;
+  }
+  if (cameras.length === 0) {
+    dbg('Aucune camera trouvee');
+    showNotice('Aucune caméra détectée.', 'error');
+    return;
+  }
+
+  // Choisir une camera back si possible
+  const backCam = cameras.find(c => /back|rear|environment|arrière|0/i.test(c.label)) || cameras[cameras.length - 1];
+  dbg('Camera choisie: id=' + backCam.id.substring(0,20) + ' label=' + backCam.label);
+
   const config = {
     fps: 10,
     qrbox: function(w, h) { return { width: Math.min(w * 0.7, 280), height: 100 }; },
-    rememberLastUsedCamera: true,
-    aspectRatio: 1.333,
   };
-  // Verifier permission camera d'abord
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showNotice('Caméra non supportée par ce navigateur. Utilise Chrome ou Safari.', 'error');
-    return;
-  }
+
   try {
-    // Test acces camera explicite (pour avoir une erreur claire)
-    const testStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-    testStream.getTracks().forEach(t => t.stop()); // on libere immediatement
-  } catch (permErr) {
-    let msg = 'Caméra refusée. ';
-    if (permErr.name === 'NotAllowedError') msg += 'Autorise la caméra dans les paramètres du site.';
-    else if (permErr.name === 'NotFoundError') msg += 'Aucune caméra détectée sur ce device.';
-    else if (permErr.name === 'NotReadableError') msg += 'Caméra utilisée par une autre app. Ferme les autres apps caméra.';
-    else msg += permErr.name + ' : ' + permErr.message;
-    showNotice(msg, 'error');
-    return;
-  }
-  try {
-    await scanner.start(
-      { facingMode: 'environment' },
-      config,
-      onScanSuccess,
-      () => {} // ignore frame errors
-    );
+    dbg('scanner.start() en cours...');
+    await scanner.start(backCam.id, config, onScanSuccess, () => {});
     scanning = true;
+    dbg('scanner.start() SUCCES, scanning=true');
     el('toggle-scan').textContent = '⏸ Pause';
     el('toggle-scan').classList.remove('success');
     el('toggle-scan').classList.add('danger');
     el('scanner-paused-msg').style.display = 'none';
+    showNotice('Caméra démarrée', 'success');
   } catch (e) {
-    showNotice('Erreur démarrage scan : ' + (e.message || e), 'error');
-    console.error(e);
+    dbg('ERREUR scanner.start: ' + (e.name || '') + ' / ' + (e.message || e));
+    let msg = 'Erreur caméra : ';
+    if (e.name === 'NotAllowedError') msg += 'autorisation refusée. Réautorise dans les paramètres du site.';
+    else if (e.name === 'NotFoundError') msg += 'caméra non trouvée.';
+    else if (e.name === 'NotReadableError') msg += 'caméra utilisée par une autre app.';
+    else msg += (e.message || e);
+    showNotice(msg, 'error');
   }
 }
 async function stopScanner() {
@@ -568,6 +606,9 @@ el('user-name-input').addEventListener('keydown', (e) => { if (e.key === 'Enter'
 el('change-user').addEventListener('click', (e) => { e.preventDefault(); promptUserName(); });
 
 // INIT
+dbg('App initialisee, user=' + (userInfo.name || 'aucun') + ', device=' + userInfo.device_id.substring(0,8));
+dbg('navigator.mediaDevices = ' + (navigator.mediaDevices ? 'OK' : 'MANQUANT'));
+dbg('Html5Qrcode = ' + (typeof Html5Qrcode !== 'undefined' ? 'OK' : 'PAS CHARGEE'));
 updateUserUI();
 if (!userInfo.name) {
   // Premiere visite : on demande le nom
