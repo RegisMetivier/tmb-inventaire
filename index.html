@@ -14,8 +14,9 @@ header .counters { font-size: 14px; opacity: 0.9; }
 main { padding: 16px; padding-bottom: 90px; }
 
 /* SCANNER */
-#scanner-zone { width: 100%; max-width: 480px; margin: 0 auto 16px; background: #000; border-radius: 12px; overflow: hidden; aspect-ratio: 4/3; position: relative; }
-#scanner-zone video { width: 100% !important; height: 100% !important; object-fit: cover; }
+#scanner-zone { width: 100%; max-width: 480px; margin: 0 auto 16px; background: #000; border-radius: 12px; overflow: hidden; position: relative; min-height: 300px; }
+#scanner-zone video, #reader video { width: 100% !important; height: auto !important; }
+#reader { width: 100%; }
 .scanner-overlay { position: absolute; inset: 0; pointer-events: none; display: flex; align-items: center; justify-content: center; }
 .scanner-target { width: 70%; max-width: 280px; height: 100px; border: 3px solid rgba(255,255,255,0.7); border-radius: 8px; }
 .scanner-flash { position: absolute; inset: 0; background: #00ff00; opacity: 0; pointer-events: none; transition: opacity 0.15s; }
@@ -282,22 +283,43 @@ function hideCurrentProduct() {
 
 async function startScanner() {
   if (scanning) return;
+  // Verifier que la lib est chargee
+  if (typeof Html5Qrcode === 'undefined') {
+    showNotice('Lib scan non chargée. Vérifie ta connexion internet et recharge la page.', 'error');
+    return;
+  }
   if (!scanner) {
-    scanner = new Html5Qrcode('reader');
+    try {
+      scanner = new Html5Qrcode('reader');
+    } catch (e) {
+      showNotice('Init scanner KO : ' + (e.message || e), 'error');
+      return;
+    }
   }
   const config = {
     fps: 10,
     qrbox: function(w, h) { return { width: Math.min(w * 0.7, 280), height: 100 }; },
-    formatsToSupport: [
-      Html5QrcodeSupportedFormats.EAN_13,
-      Html5QrcodeSupportedFormats.EAN_8,
-      Html5QrcodeSupportedFormats.UPC_A,
-      Html5QrcodeSupportedFormats.UPC_E,
-      Html5QrcodeSupportedFormats.CODE_128,
-      Html5QrcodeSupportedFormats.CODE_39,
-    ],
     rememberLastUsedCamera: true,
+    aspectRatio: 1.333,
   };
+  // Verifier permission camera d'abord
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showNotice('Caméra non supportée par ce navigateur. Utilise Chrome ou Safari.', 'error');
+    return;
+  }
+  try {
+    // Test acces camera explicite (pour avoir une erreur claire)
+    const testStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    testStream.getTracks().forEach(t => t.stop()); // on libere immediatement
+  } catch (permErr) {
+    let msg = 'Caméra refusée. ';
+    if (permErr.name === 'NotAllowedError') msg += 'Autorise la caméra dans les paramètres du site.';
+    else if (permErr.name === 'NotFoundError') msg += 'Aucune caméra détectée sur ce device.';
+    else if (permErr.name === 'NotReadableError') msg += 'Caméra utilisée par une autre app. Ferme les autres apps caméra.';
+    else msg += permErr.name + ' : ' + permErr.message;
+    showNotice(msg, 'error');
+    return;
+  }
   try {
     await scanner.start(
       { facingMode: 'environment' },
@@ -311,7 +333,7 @@ async function startScanner() {
     el('toggle-scan').classList.add('danger');
     el('scanner-paused-msg').style.display = 'none';
   } catch (e) {
-    showNotice('Erreur caméra : ' + e, 'error');
+    showNotice('Erreur démarrage scan : ' + (e.message || e), 'error');
     console.error(e);
   }
 }
